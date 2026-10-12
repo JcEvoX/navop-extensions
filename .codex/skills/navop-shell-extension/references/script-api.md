@@ -14,6 +14,8 @@ import { dispatch, current } from "navop.workbench";
 import { current as ctx } from "navop.context";   // 注意与 workbench.current 的内容不同
 import { info, error as logError } from "navop.log";
 import * as dev from "navop.dev";            // dev-tools 专用
+import { locale, available } from "navop.i18n";   // 宿主当前界面语言（词条表自己带，见 §6.3）
+import * as theme from "navop.theme";        // 组件库那套主题名（§6.2）
 ```
 
 - **输入状态优先用 `gpui-base.InputState.new()` / `TextareaState.new()`**；styled `Input` / `Textarea` 从 `gpui-component` 导入。此规则只针对已验证的输入桥接，不表示所有 state 都在 base，也不表示 component catalog 的 retained state 都是空壳。
@@ -122,7 +124,9 @@ new Spinner().size("medium")
 | 交互 div | 需要 hover/click 状态的加 `.id("唯一id")`；行可点加 `.cursor_pointer()` |
 | 主题色 | 只用 `cx.theme().colors.<token>` 或 `#hex`；等宽文本 `.font_family("monospace")` |
 
-## 6. 主题 token 闭集（18 个，多一个都不认）
+## 6. 主题与语言
+
+### 6.1 `cx.theme()`：18 个语义色闭集（多一个都不认）
 
 ```
 background  foreground      surface    surface_foreground
@@ -134,6 +138,53 @@ ring        selection
 
 - `cx.theme().colors` 是 gpui-base 的语义色闭集（`../gpui-component/crates/shell/src/theme_tokens.rs`）；组件库自家主题名（`list_active`、`table_hover`）读出来是 `undefined` ⇒ 整页渲染失败（"This view could not be rendered" / `expected a string, got nil`）。
 - 静态守卫：`tests/scripts.test.mjs` 里两条测试 —— ①扩展 UI 不得出现裸 token 名颜色（颜色要么主题 token 要么 #rgb/#rrggbb/#rrggbbaa）；②`cx.theme().colors.<name>` 的 name 必须在 18 名单内（名单是契约，故意与 gpui-component 重复）。
+
+### 6.2 `navop.theme`：组件库那套主题名（100 多个）
+
+6.1 那 18 个只是 gpui-base 的语义面。宿主界面自己画的东西主要在组件库的**另一套**主题里（`background`、`popover`、`list_active`、`table_hover`、`sidebar_*`、`chart_*` …），它们读不到 `cx.theme()`，要从 `navop.theme` 取：
+
+```js
+import * as theme from "navop.theme";
+import { div } from "gpui";
+
+const danger = theme.color("danger");        // "#rrggbbaa" 或 null
+```
+
+| 函数 | 返回 |
+|---|---|
+| `appearance()` | `"light"` \| `"dark"` |
+| `names()` | 全部可用名字 |
+| `colors()` | `{ 名字: "#rrggbbaa" }` |
+| `color(name)` | `"#rrggbbaa"` \| `null` |
+| `revision()` | 主题每次变化 +1 |
+
+- 颜色统一是 `#rrggbbaa`（`gpui::Hsla` 的序列化形式），可以直接喂给 `bg()` / `text_color()` / `Badge.color` / `Icon.color`。
+- ⚠️ **取不到的名字返回 `null`，不是让整页挂掉** —— 与 6.1「名字错 ⇒ 整页白屏」的失败方式**不一样**，所以别指望静态守卫救你：自己兜底，`theme.color("x") ?? "#00000000"`。
+- manifest 里要声明 `modules: ["theme"]`。
+
+### 6.3 `navop.i18n`：宿主语言 + 扩展自带词条表
+
+**词条表由扩展自己带**，宿主只回答"现在是什么语言"：
+
+```js
+import { locale } from "navop.i18n";
+
+const TABLES = { en: { connect: "Connect" }, "zh-CN": { connect: "连接" }, "zh-HK": { connect: "連接" } };
+const t = (key) => (TABLES[locale()] ?? TABLES.en)[key] ?? key;
+
+render(_cx) { return div().child(t("connect")); }   // ← 必须在 render 里读
+```
+
+| 函数 | 返回 |
+|---|---|
+| `locale()` | 宿主当前界面语言：`"en"` \| `"zh-CN"` \| `"zh-HK"` |
+| `available()` | 宿主可能处在的语言（顺序无含义） |
+| `revision()` | 每次宿主切语言 +1 |
+
+- 宿主**没有** `t(key)` 给扩展用：扩展的文案不在宿主自己的 `locales/` 里，宿主替扩展解析会把两边的键空间搅在一起（宿主的 `common.connect` 与扩展的同名键撞上时谁都说不清谁赢）。分工是「宿主给事实、扩展带词条」——与驱动扩展的 `locales/*.yml` 是同一套思路。
+- ⚠️ **切语言时宿主重建的是页面的 `render()`，`init()` 不会再跑一遍**（`ScriptView::refresh` → `rebuild` → 已有实例的 `render`）。所以**别在 `init` 里把词条表选好存起来**：那样切语言后页面仍显示旧语言，而且不报任何错。要么每次 `render` 读 `locale()`，要么在 `render` 里比对 `revision()` 再重选表。
+- `shellViews[].title` / 工具箱卡片文案写在 manifest 里，是**单语言**的：页面内文案能跟随语言，标题不行（除非按语言发不同扩展）。
+- manifest 里要声明 `modules: ["i18n"]`；它不碰资源，**纯界面页可以只声明这一个**（不需要 `backends`，嵌入式工作台页面也可用）。`navop.theme` 同理。
 
 ## 7. 实时数据：轮询（嵌入式页面唯一选择）
 

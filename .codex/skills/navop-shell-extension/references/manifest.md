@@ -168,8 +168,14 @@
 | `log` | `navop.log` | `debug/info/warn/error(message)` —— 进扩展结构化日志（`navop.log` 用法见 dev-tools workbench.js） |
 | `runtime` | `navop.runtime` | `info(backend)` → `{ backend, runtimeId, generation }` |
 | `dev` | `navop.dev` | `list/open/reload/watch/remove/logs/pickDirectory/pickResult/openView` —— dev-tools 专用 |
+| `i18n` | `navop.i18n` | `locale()` → 宿主当前界面语言（`"en"` \| `"zh-CN"` \| `"zh-HK"`）、`available()` → 宿主可能处在的语言、`revision()` → 每次切语言 +1。**只给语言事实，没有词条表** —— 扩展自己的文案自己带（见 [脚本 API §6.3](script-api.md)） |
+| `theme` | `navop.theme` | `appearance()` → `"light"` \| `"dark"`、`names()` → 组件主题名清单、`colors()` → `{ 名字: "#rrggbbaa" }`、`color(name)` → `string` \| `null`、`revision()` → 主题变了 +1。**组件库那些面（`list_active`、`table_hover`、`sidebar_*`）只在这里**：`cx.theme()` 仍然是 gpui-base 的 18 个语义色（见 [脚本 API §6.2](script-api.md)） |
 
-`ShellHostModule` 枚举源：`../navop/crates/extension-runtime/src/extension/manifest/contributes/shell.rs`；模块实现：`../navop/crates/universal-plugins/src/shell_plugin_host/{context,workbench,resource,job,event,blob,log,runtime,dev}.rs`（declarations 即 TS 签名，以它为准）。
+`i18n` 与 `theme` **不碰资源**（既不需要 `backends`，嵌入式工作台页面也可用），所以纯界面页可以只声明这两个。
+
+`ShellHostModule` 枚举源：`../navop/crates/extension-runtime/src/extension/manifest/contributes/shell.rs`（`module_specifier()` 是「声明面拼写 ↔ 脚本 import 名字」的唯一来源）；模块实现：`../navop/crates/universal-plugins/src/shell_plugin_host/{context,workbench,resource,job,event,blob,log,runtime,dev,i18n,theme}.rs`（declarations 即 TS 签名，以它为准）。
+
+上表的覆盖范围由宿主侧的守卫盯着：`cargo test -p universal-plugins --features shell-plugins -- the_skill_document_lists_every_declared_host_module`（相邻仓缺席时跳过）。
 
 ## 8. 构建 / 安装 / 发布
 
