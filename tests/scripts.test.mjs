@@ -1215,7 +1215,7 @@ test("Windows x86 backfill matrix resolves every supported published extension",
   );
   const matrix = JSON.parse(output);
 
-  assert.equal(matrix.include.length, 18);
+  assert.equal(matrix.include.length, 19);
   assert.deepEqual(
     matrix.include.map((entry) => entry.extension),
     [
@@ -1224,6 +1224,7 @@ test("Windows x86 backfill matrix resolves every supported published extension",
       "dm",
       "docker",
       "duckdb",
+      "gemini-acp",
       "iotdb",
       "kingbase",
       "mongodb-legacy",

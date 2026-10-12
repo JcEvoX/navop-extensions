@@ -88,6 +88,7 @@ bash scripts/install-local-composite-extensions.sh   # 构建并装到 ~/.config
 - operations 的 `requires` 填 provider method URI 清单（capabilities 按它校验）；新增有能力的操作就把 method 填进去。
 - 一个 page 只允许一个 stack 原语（多原语安装期被拒）；table 只有行级 actions，没有页面级 toolbar。
 - `shellViews[].modules` 决定可用宿主模块：`workbench` 仅工作台挂载会话可用（独立打开必报错，且这类视图不进工具箱）。
+- 文案跟随界面语言用 `navop.i18n`（`modules: ["i18n"]`），组件库那套主题名（`list_active`/`table_hover`）用 `navop.theme`（`modules: ["theme"]`）。两个都**不碰资源**：不需要 `backends`，嵌入式工作台页面也能用 —— 纯界面页可以只声明这两个。⚠️ 切语言时宿主重建的是 `render()`、**不重跑 `init()`**，所以 `locale()` 必须在 `render()` 里读；细节见 `references/script-api.md` §6.2/§6.3。
 - 改动 languages/i18n key 时同步 locales（守卫测试 1338/1414 行那组）。
 
 ## 参考
