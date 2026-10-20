@@ -5,6 +5,7 @@ members = [
     "extensions/composite/docker",
     "extensions/composite/mqtt",
     "extensions/composite/rocketmq",
+    "extensions/ipc/clickhouse",
     "extensions/ipc/duckdb",
     "extensions/ipc/opengauss",
     "extensions/ipc/redis",
@@ -40,6 +41,14 @@ async-trait = "0.1"
 base64 = "0.22"
 bson = { version = "2.13", features = ["chrono-0_4"] }
 chrono = { version = "0.4.23", features = ["serde"] }
+# ClickHouse 官方 Rust 客户端。0.15.1 在 rustc 1.98 + 本仓依赖集上编译失败,
+# 升级到 0.15.3 修复(见 extensions/ipc/clickhouse/README 说明)。
+# TLS 强制 ring provider:aws-lc-sys 无法在 i686-pc-windows-msvc 构建(与 rumqttc 同策略)。
+clickhouse = { version = "0.15.3", default-features = false, features = [
+    "lz4",
+    "rustls-tls-ring",
+    "rustls-tls-native-roots",
+] }
 duckdb = { version = "1.10504.0", features = ["bundled"] }
 elasticsearch = { version = "9.1.0-alpha.1", default-features = false, features = ["rustls-tls"] }
 bollard = { version = "0.21.1", features = ["ssl"] }
