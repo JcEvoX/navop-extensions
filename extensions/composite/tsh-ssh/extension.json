@@ -9,7 +9,7 @@
   "categories": ["developer-tools"],
   "keywords": ["teleport", "tsh", "ssh", "terminal"],
   "engines": {
-    "onetcli": ">=0.21.0"
+    "onetcli": ">=0.20.4"
   },
   "api": {
     "extension": "1.0"
