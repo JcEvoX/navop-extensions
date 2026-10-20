@@ -2,8 +2,8 @@
   "schema_version": 1,
   "id": "com.onetcli.importer.mobaxterm",
   "name": "MobaXterm Importer",
-  "description": "从 MobaXterm 的 MobaXterm.ini 配置或 .mxtsessions 会话导出文件中发现 SSH 连接，并通过 Rust WASM 导入到 Navop；支持便携版与安装版配置的手动迁移。 Discovers SSH connections from MobaXterm.ini configurations or .mxtsessions session exports and imports them into Navop through Rust WASM, including manual migration of portable and installer edition configurations.",
-  "version": "0.1.0",
+  "description": "从 MobaXterm 的 MobaXterm.ini 配置或 .mxtsessions 会话导出文件中发现 SSH 连接，并通过 Rust WASM 导入到 Navop；支持便携版与安装版配置的手动迁移；未设置主密码时保存的口令会自动解密导入，设置了主密码的配置会明确提示。 Discovers SSH connections from MobaXterm.ini configurations or .mxtsessions session exports and imports them into Navop through Rust WASM, including manual migration of portable and installer edition configurations. Saved passwords are decrypted automatically unless a master password is configured, in which case the import reports it explicitly.",
+  "version": "0.1.1",
   "publisher": "Navop",
   "engines": {
     "onetcli": ">=0.7.0"
@@ -24,6 +24,8 @@
   },
   "permissions": [
     "fs:read:%USERPROFILE%/Documents/MobaXterm",
+    "fs:read:%USERPROFILE%/OneDrive/Documents/MobaXterm",
+    "fs:read:%OneDrive%/Documents/MobaXterm",
     "fs:read:%APPDATA%/MobaXterm"
   ],
   "contributes": {
@@ -32,7 +34,7 @@
         "id": "mobaxterm",
         "runtimeId": "mobaxterm-importer",
         "displayName": "MobaXterm",
-        "description": "从 MobaXterm 配置目录、MobaXterm.ini 或 .mxtsessions 文件发现并导入 SSH 连接。 Discover and import SSH connections from MobaXterm configuration directories, MobaXterm.ini, or .mxtsessions files.",
+        "description": "从 MobaXterm 配置目录、MobaXterm.ini、.mxtsessions 或 .moba 文件发现并导入 SSH 连接（含便携版目录）。 Discover and import SSH connections from MobaXterm configuration directories, MobaXterm.ini, .mxtsessions, or .moba files, including portable editions.",
         "icon": "terminal",
         "outputKinds": [
           "ssh"
@@ -43,15 +45,25 @@
           "linux"
         ],
         "manualFilePick": {
-          "prompt": "选择 MobaXterm.ini / .mxtsessions 文件",
+          "prompt": "选择 MobaXterm.ini / .mxtsessions 文件（便携版请选 MobaXterm.exe 所在目录）",
           "supportsDirectories": true,
-          "directoryPrompt": "选择 MobaXterm 配置目录"
+          "directoryPrompt": "选择 MobaXterm 配置目录（便携版选 MobaXterm.exe 所在文件夹）"
         },
         "candidateFiles": [
           {
             "id": "mobaxterm-windows-documents",
             "platform": "windows",
             "path": "%USERPROFILE%/Documents/MobaXterm"
+          },
+          {
+            "id": "mobaxterm-windows-onedrive-documents",
+            "platform": "windows",
+            "path": "%USERPROFILE%/OneDrive/Documents/MobaXterm"
+          },
+          {
+            "id": "mobaxterm-windows-onedrive-env",
+            "platform": "windows",
+            "path": "%OneDrive%/Documents/MobaXterm"
           },
           {
             "id": "mobaxterm-windows-appdata",

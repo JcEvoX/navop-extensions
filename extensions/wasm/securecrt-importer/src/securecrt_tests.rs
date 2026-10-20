@@ -1,7 +1,7 @@
 use crate::component::candidate_directory_prefix;
 use crate::securecrt::{
     QuickCommandImportRecord, SourceKind, SshImportAuthMethod, append_workspace_records,
-    classify_source, preview_records_from_sources,
+    classify_source, preview_records_from_sources, preview_records_from_sources_with_passphrase,
 };
 
 #[test]
@@ -614,7 +614,7 @@ S:"Password V2"=02:credential-secret
         record
             .warnings
             .iter()
-            .any(|warning| warning.code == "securecrt_encrypted_password_not_imported")
+            .any(|warning| warning.code == "securecrt_password_decrypt_failed")
     );
     assert!(
         !serde_json::to_string(record)
@@ -878,4 +878,144 @@ fn utf16_be(text: &str) -> Vec<u8> {
         bytes.extend_from_slice(&unit.to_be_bytes());
     }
     bytes
+}
+
+// ---- 密码解密（移植自 scrt-go-migrate 的向量） ----
+
+/// Go 端已验证的三条向量，这里当端到端夹具用：
+/// V1 无前缀、`02:` SHA256、`03:` bcrypt-pbkdf（口令均为 `configpass`，
+/// 其中 V1 与口令无关）。
+const V1_PASSWORD_CIPHERTEXT: &str = "c9d42f89c85d3c089d115db0e899c2070d653048467f869d196d689f754269d5d04ec18a59b46a5c94c39574a0593ed896cd25e84707089f";
+const V2_02_PASSWORD_CIPHERTEXT: &str = "02:ce03b492b17bdd0e66ddce4732ddbbe6afb25537207e4e1b61b35472cd5320f0b7b597cb8a27f1986301290565f50233e0eeefd794ae86ff85ccaf44276133eb";
+const V2_03_PASSWORD_CIPHERTEXT: &str = "03:000102030405060708090a0b0c0d0e0fdc2bbba761e1186c63ec87155e157c0882bd8806c52e6b100ec0d3136513a24e4df7fe48eaf506e7f00e21def5abe00fd4769bffe21d210e3a66f9115c7e03a8";
+
+fn session_with_password(ciphertext: &str) -> Vec<u8> {
+    format!(
+        "S:\"Hostname\"=prod.example.test\nS:\"Protocol Name\"=SSH2\nS:\"Username\"=deploy\nS:\"Password V2\"={ciphertext}\n"
+    )
+    .into_bytes()
+}
+
+fn imported_password(record: &crate::securecrt::ImportRecord) -> Option<String> {
+    match &record.ssh.as_ref().expect("ssh record").auth_method {
+        SshImportAuthMethod::Password { password } => password.clone(),
+        other => panic!("expected password auth, got {other:?}"),
+    }
+}
+
+#[test]
+fn imports_v1_password_when_passwords_are_requested() {
+    let session = session_with_password(V1_PASSWORD_CIPHERTEXT);
+    let result = preview_records_from_sources(
+        vec![("Sessions/Production/API.ini".into(), session.as_slice())],
+        true,
+    );
+
+    let record = &result.records[0];
+    assert_eq!(record.password_status, "included");
+    assert_eq!(
+        imported_password(record).as_deref(),
+        Some("mySecretPassword123")
+    );
+    assert!(record.warnings.is_empty());
+}
+
+#[test]
+fn imports_v2_sha256_password_when_passwords_are_requested() {
+    let session = session_with_password(V2_02_PASSWORD_CIPHERTEXT);
+    let result = preview_records_from_sources_with_passphrase(
+        vec![("Sessions/Production/API.ini".into(), session.as_slice())],
+        true,
+        "configpass",
+    );
+
+    let record = &result.records[0];
+    assert_eq!(record.password_status, "included");
+    assert_eq!(imported_password(record).as_deref(), Some("pass-02-vector"));
+}
+
+#[test]
+fn imports_v2_bcrypt_password_when_passwords_are_requested() {
+    let session = session_with_password(V2_03_PASSWORD_CIPHERTEXT);
+    let result = preview_records_from_sources_with_passphrase(
+        vec![("Sessions/Production/API.ini".into(), session.as_slice())],
+        true,
+        "configpass",
+    );
+
+    let record = &result.records[0];
+    assert_eq!(record.password_status, "included");
+    assert_eq!(imported_password(record).as_deref(), Some("pass-03-vector"));
+}
+
+#[test]
+fn password_is_not_decrypted_when_the_caller_does_not_ask_for_it() {
+    let session = session_with_password(V2_02_PASSWORD_CIPHERTEXT);
+    let result = preview_records_from_sources(
+        vec![("Sessions/Production/API.ini".into(), session.as_slice())],
+        false,
+    );
+
+    let record = &result.records[0];
+    assert_eq!(record.password_status, "unsupported");
+    assert_eq!(imported_password(record), None);
+    assert!(
+        !serde_json::to_string(record)
+            .unwrap()
+            .contains("pass-02-vector")
+    );
+}
+
+#[test]
+fn credential_password_is_decrypted_and_reused_by_referencing_sessions() {
+    let session = br#"S:"Hostname"=prod.example.test
+S:"Protocol Name"=SSH2
+S:"Credential Title"=Deploy
+"#;
+    let credential = format!("S:\"Username\"=deploy\nS:\"Password V2\"={V1_PASSWORD_CIPHERTEXT}\n");
+    let result = preview_records_from_sources(
+        vec![
+            (
+                "Sessions/Production/API.ini".to_string(),
+                session.as_slice(),
+            ),
+            ("Credentials/Deploy.ini".to_string(), credential.as_bytes()),
+        ],
+        true,
+    );
+
+    assert_eq!(result.records.len(), 1);
+    let record = &result.records[0];
+    assert_eq!(record.password_status, "included");
+    assert_eq!(
+        imported_password(record).as_deref(),
+        Some("mySecretPassword123")
+    );
+}
+
+#[test]
+fn xml_export_password_is_decrypted_too() {
+    let xml = format!(
+        r#"<VanDyke>
+  <key name="Sessions">
+    <key name="Production">
+      <key name="API">
+        <string name="Hostname">prod.example.test</string>
+        <string name="Protocol Name">SSH2</string>
+        <string name="Username">deploy</string>
+        <string name="Password V2">{V2_02_PASSWORD_CIPHERTEXT}</string>
+      </key>
+    </key>
+  </key>
+</VanDyke>"#
+    );
+    let result = preview_records_from_sources_with_passphrase(
+        vec![("export.xml".into(), xml.as_bytes())],
+        true,
+        "configpass",
+    );
+
+    let record = &result.records[0];
+    assert_eq!(record.password_status, "included");
+    assert_eq!(imported_password(record).as_deref(), Some("pass-02-vector"));
 }

@@ -1,5 +1,8 @@
 use plist::{Dictionary, Value};
 use quick_xml::{Reader, events::Event};
+
+#[path = "decrypt.rs"]
+mod decrypt;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::io::Cursor;
@@ -37,29 +40,35 @@ pub struct ImportWarning {
     pub message: String,
 }
 
-pub fn preview_records_from_plists<'a, I>(plists: I, _include_passwords: bool) -> Vec<ImportRecord>
+pub fn preview_records_from_plists<'a, I>(plists: I, include_passwords: bool) -> Vec<ImportRecord>
 where
     I: IntoIterator<Item = (String, &'a [u8])>,
 {
     let mut records = Vec::new();
     for (path, bytes) in plists {
         if let Ok(value) = Value::from_reader(Cursor::new(bytes)) {
-            collect_records(&path, "", &value, &mut records);
+            collect_records(&path, "", &value, include_passwords, &mut records);
             continue;
         }
         let Ok(text) = std::str::from_utf8(bytes) else {
             continue;
         };
-        records.extend(records_from_ncx(&path, text));
+        records.extend(records_from_ncx(&path, text, include_passwords));
     }
     records
 }
 
-fn collect_records(path: &str, key_path: &str, value: &Value, records: &mut Vec<ImportRecord>) {
+fn collect_records(
+    path: &str,
+    key_path: &str,
+    value: &Value,
+    include_passwords: bool,
+    records: &mut Vec<ImportRecord>,
+) {
     let Some(dict) = value.as_dictionary() else {
         return;
     };
-    if let Some(record) = record_from_dict(path, key_path, dict) {
+    if let Some(record) = record_from_dict(path, key_path, dict, include_passwords) {
         records.push(record);
     }
     for (key, child) in dict {
@@ -68,11 +77,16 @@ fn collect_records(path: &str, key_path: &str, value: &Value, records: &mut Vec<
         } else {
             format!("{key_path}/{key}")
         };
-        collect_records(path, &child_path, child, records);
+        collect_records(path, &child_path, child, include_passwords, records);
     }
 }
 
-fn record_from_dict(path: &str, key_path: &str, dict: &Dictionary) -> Option<ImportRecord> {
+fn record_from_dict(
+    path: &str,
+    key_path: &str,
+    dict: &Dictionary,
+    include_passwords: bool,
+) -> Option<ImportRecord> {
     if is_parameter_dict(key_path) {
         return None;
     }
@@ -120,6 +134,8 @@ fn record_from_dict(path: &str, key_path: &str, dict: &Dictionary) -> Option<Imp
     )
     .unwrap_or_else(|| fallback_name.to_string());
 
+    let (password, password_status, warnings) = resolve_password(dict, include_passwords);
+
     Some(ImportRecord {
         id: record_id(&source_id),
         importer_id: "navicat".to_string(),
@@ -134,7 +150,7 @@ fn record_from_dict(path: &str, key_path: &str, dict: &Dictionary) -> Option<Imp
             port: port_field(dict, &["Port", "port"]),
             username: text_field(dict, &["UserName", "Username", "User", "UID", "username"])
                 .unwrap_or_default(),
-            password: None,
+            password,
             database: text_field(
                 dict,
                 &[
@@ -149,12 +165,54 @@ fn record_from_dict(path: &str, key_path: &str, dict: &Dictionary) -> Option<Imp
         }),
         ssh: None,
         port_forwarding: None,
-        password_status: "unsupported".to_string(),
-        warnings: Vec::new(),
+        password_status: password_status.to_string(),
+        warnings,
     })
 }
 
-fn records_from_ncx(path: &str, text: &str) -> Vec<ImportRecord> {
+/// 解 Navicat 口令。只有旧版（`libcc` 固定密钥 + 十六进制密文）解得开；
+/// 12+ 的逐安装密钥解不开时保留 `unsupported` 并说明原因。
+fn resolve_password(
+    dict: &Dictionary,
+    include_passwords: bool,
+) -> (Option<String>, &'static str, Vec<ImportWarning>) {
+    let Some(raw) = dict_value(dict, &["Password", "password"]) else {
+        return (None, "missing", Vec::new());
+    };
+    // plist 里偶尔是 <data> 而不是 <string>，这种连密文都读不出来。
+    let Some(ciphertext) = value_text(raw)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return (
+            None,
+            "unsupported",
+            vec![ImportWarning {
+                code: "navicat_password_unreadable".to_string(),
+                message: "This Navicat password is stored as binary data and could not be read."
+                    .to_string(),
+            }],
+        );
+    };
+    if !include_passwords {
+        return (None, "unsupported", Vec::new());
+    }
+    match decrypt::decrypt_legacy_password(ciphertext) {
+        Some(password) => (Some(password), "included", Vec::new()),
+        None => (
+            None,
+            "unsupported",
+            vec![ImportWarning {
+                code: "navicat_password_decrypt_failed".to_string(),
+                message: "This Navicat password uses a newer per-installation key and could \
+                          not be decrypted; re-enter it after import."
+                    .to_string(),
+            }],
+        ),
+    }
+}
+
+fn records_from_ncx(path: &str, text: &str, include_passwords: bool) -> Vec<ImportRecord> {
     let mut reader = Reader::from_str(text);
     reader.config_mut().trim_text(true);
     let mut records = Vec::new();
@@ -185,7 +243,7 @@ fn records_from_ncx(path: &str, text: &str) -> Vec<ImportRecord> {
                 } else {
                     format!("Connections/{connection_name}#{occurrence}")
                 };
-                if let Some(record) = record_from_dict(path, &key_path, &dict) {
+                if let Some(record) = record_from_dict(path, &key_path, &dict, include_passwords) {
                     records.push(record);
                 }
             }
@@ -466,7 +524,8 @@ mod tests {
         );
         assert_eq!("database", record.kind);
         assert_eq!("prod-lite", record.display_name);
-        assert_eq!("unsupported", record.password_status);
+        // conn.plist 里根本没有口令字段（Navicat Lite 存在别处），所以是 missing 不是 unsupported。
+        assert_eq!("missing", record.password_status);
 
         let database = record.database.as_ref().unwrap();
         assert_eq!("my_sql", database.database_type);
@@ -608,5 +667,88 @@ mod tests {
         assert_eq!("sqlite", sqlite_database.database_type);
         assert_eq!("C:\\Data\\local.db", sqlite_database.host);
         assert_eq!(None, sqlite_database.port);
+    }
+
+    // ---- 口令解密（旧版 ncx，libcc 固定密钥） ----
+
+    /// 密文由 Node `aes-128-cbc` 用同一组 key/iv 生成，明文 `database-secret`。
+    const LEGACY_PASSWORD_CIPHERTEXT: &str = "9E3951B0152DA9E9391648E8B0B58029";
+
+    #[test]
+    fn decrypts_legacy_ncx_password_when_passwords_are_requested() {
+        let ncx = format!(
+            r#"<Connections>
+  <Connection ConnType="MYSQL" ConnectionName="mysql-legacy" Host="db.example.test" Port="3306" UserName="root" Password="{LEGACY_PASSWORD_CIPHERTEXT}" />
+</Connections>"#
+        );
+        let records =
+            preview_records_from_plists(vec![("connection.ncx".to_string(), ncx.as_bytes())], true);
+
+        let record = &records[0];
+        assert_eq!("included", record.password_status);
+        assert_eq!(
+            record.database.as_ref().unwrap().password.as_deref(),
+            Some("database-secret")
+        );
+        assert!(record.warnings.is_empty());
+    }
+
+    #[test]
+    fn password_is_not_decrypted_or_leaked_when_not_requested() {
+        let ncx = format!(
+            r#"<Connections>
+  <Connection ConnType="MYSQL" ConnectionName="mysql-legacy" Host="db.example.test" UserName="root" Password="{LEGACY_PASSWORD_CIPHERTEXT}" />
+</Connections>"#
+        );
+        let records = preview_records_from_plists(
+            vec![("connection.ncx".to_string(), ncx.as_bytes())],
+            false,
+        );
+
+        let record = &records[0];
+        assert_eq!("unsupported", record.password_status);
+        assert!(record.database.as_ref().unwrap().password.is_none());
+        assert!(
+            !serde_json::to_string(record)
+                .unwrap()
+                .contains("database-secret")
+        );
+    }
+
+    #[test]
+    fn newer_navicat_ciphertext_reports_that_it_could_not_be_decrypted() {
+        // Navicat 12+ 用逐安装派生的密钥，密文不是十六进制。
+        let plist = br#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+  <key>Servers</key>
+  <dict>
+    <key>mysql-prod</key>
+    <dict>
+      <key>Name</key><string>Prod MySQL</string>
+      <key>ConnType</key><string>MYSQL</string>
+      <key>Host</key><string>db.example.test</string>
+      <key>UserName</key><string>root</string>
+      <key>Password</key><string>dGhpcyBpcyBub3QgaGV4</string>
+    </dict>
+  </dict>
+</dict>
+</plist>"#;
+        let records = preview_records_from_plists(
+            vec![(
+                "com.prect.NavicatPremium.plist".to_string(),
+                plist.as_slice(),
+            )],
+            true,
+        );
+
+        let record = &records[0];
+        assert_eq!("unsupported", record.password_status);
+        assert!(
+            record
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "navicat_password_decrypt_failed")
+        );
     }
 }

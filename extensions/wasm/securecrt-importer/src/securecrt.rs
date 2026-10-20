@@ -1,5 +1,7 @@
 #[path = "button_bar.rs"]
 mod button_bar;
+#[path = "decrypt.rs"]
+mod decrypt;
 #[path = "ini.rs"]
 mod ini;
 #[path = "model.rs"]
@@ -20,14 +22,31 @@ pub use model::{
 pub(crate) use source::session_directory_group_path;
 pub use source::{SourceKind, classify_source};
 
+/// 未设置配置口令时使用的默认值；`component` 侧显式透传，便于将来接 UI 输入。
+pub(crate) use decrypt::DEFAULT_PASSPHRASE;
+
+/// 用默认（空）配置口令解析导入源。
 pub fn preview_records_from_sources<'a, I>(sources: I, include_passwords: bool) -> PreviewResult
 where
     I: IntoIterator<Item = (String, &'a [u8])>,
 {
-    // SecureCRT configuration passwords are encrypted with product-specific
-    // mechanisms. They are never decrypted or returned, regardless of this
-    // generic host option.
-    let _ = include_passwords;
+    preview_records_from_sources_with_passphrase(
+        sources,
+        include_passwords,
+        decrypt::DEFAULT_PASSPHRASE,
+    )
+}
+
+/// 与 [`preview_records_from_sources`] 相同，但可显式传入 SecureCRT 配置口令
+/// （用户在 SecureCRT 里设过 "Configuration Passphrase" 时才有必要）。
+pub fn preview_records_from_sources_with_passphrase<'a, I>(
+    sources: I,
+    include_passwords: bool,
+    passphrase: &str,
+) -> PreviewResult
+where
+    I: IntoIterator<Item = (String, &'a [u8])>,
+{
     let mut result = PreviewResult::default();
     let mut seen = BTreeSet::new();
     let mut credentials = BTreeMap::new();
@@ -47,11 +66,7 @@ where
             let credential_fields = ini::parse_fields(&text);
             credentials.insert(
                 credential_key(&path),
-                CredentialMetadata {
-                    username: model::field(&credential_fields, "Username"),
-                    encrypted_password: model::field(&credential_fields, "Password V2").is_some()
-                        || model::field(&credential_fields, "Password").is_some(),
-                },
+                credential_metadata(&credential_fields, include_passwords, passphrase),
             );
             continue;
         }
@@ -61,12 +76,26 @@ where
     for (path, text, kind) in decoded_sources {
         let parsed = match kind {
             SourceKind::SessionIni => {
-                { ini::parse_session(&path, &text, &credentials, &mut result.warnings) }
-                    .into_iter()
-                    .collect()
+                ini::parse_session(
+                    &path,
+                    &text,
+                    &credentials,
+                    include_passwords,
+                    passphrase,
+                    &mut result.warnings,
+                )
             }
+            .into_iter()
+            .collect(),
             SourceKind::FolderData => folder_data_records(&path, &text),
-            SourceKind::Xml => xml::parse_export(&path, &text, &credentials, &mut result.warnings),
+            SourceKind::Xml => xml::parse_export(
+                &path,
+                &text,
+                &credentials,
+                include_passwords,
+                passphrase,
+                &mut result.warnings,
+            ),
             SourceKind::ButtonBar => {
                 button_bar::parse_button_bar(&path, &text, &mut result.warnings)
             }
@@ -86,6 +115,34 @@ where
         }
     }
     result
+}
+
+/// 解出 Credentials 目录里一条凭据的用户名与密码。
+///
+/// 凭据密码与会话密码同源同算法，因此在这里一次性解好，供引用它的会话复用。
+fn credential_metadata(
+    fields: &BTreeMap<String, String>,
+    include_passwords: bool,
+    passphrase: &str,
+) -> CredentialMetadata {
+    let ciphertext =
+        model::field(fields, "Password V2").or_else(|| model::field(fields, "Password"));
+    let mut metadata = CredentialMetadata {
+        username: model::field(fields, "Username"),
+        has_ciphertext: ciphertext.is_some(),
+        password: None,
+        password_error: None,
+    };
+    if !include_passwords {
+        return metadata;
+    }
+    if let Some(ciphertext) = ciphertext {
+        match decrypt::decrypt_config_password(&ciphertext, passphrase) {
+            Ok(password) => metadata.password = Some(password),
+            Err(error) => metadata.password_error = Some(error),
+        }
+    }
+    metadata
 }
 
 pub(crate) fn append_workspace_records<I>(result: &mut PreviewResult, groups: I)

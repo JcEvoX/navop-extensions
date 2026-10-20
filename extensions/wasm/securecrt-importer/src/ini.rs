@@ -10,6 +10,8 @@ pub(crate) fn parse_session(
     path: &str,
     text: &str,
     credentials: &BTreeMap<String, CredentialMetadata>,
+    include_passwords: bool,
+    passphrase: &str,
     warnings: &mut Vec<ImportWarning>,
 ) -> Option<ImportRecord> {
     let mut fields = parse_fields(text);
@@ -23,6 +25,8 @@ pub(crate) fn parse_session(
         session_name(path),
         &fields,
         port,
+        include_passwords,
+        passphrase,
         warnings,
     )
 }

@@ -33,11 +33,17 @@ pub(crate) fn parse_export(
     path: &str,
     text: &str,
     credentials: &BTreeMap<String, CredentialMetadata>,
+    include_passwords: bool,
+    passphrase: &str,
     warnings: &mut Vec<ImportWarning>,
 ) -> Vec<ImportRecord> {
     let mut reader = Reader::from_str(text);
     reader.config_mut().trim_text(true);
-    let mut state = XmlState::default();
+    let mut state = XmlState {
+        include_passwords,
+        passphrase: passphrase.to_string(),
+        ..XmlState::default()
+    };
     let mut parse_failed = false;
 
     loop {
@@ -90,6 +96,9 @@ struct XmlState {
     ignored_depth: usize,
     button_count: usize,
     depth_warning: Option<ImportWarning>,
+    /// 由 `parse_export` 注入，`finish_key` 生成记录时用来解密密码。
+    include_passwords: bool,
+    passphrase: String,
 }
 
 impl XmlState {
@@ -230,6 +239,8 @@ impl XmlState {
             frame.name,
             &frame.fields,
             port,
+            self.include_passwords,
+            &self.passphrase,
             warnings,
         ) {
             self.records.push(record);

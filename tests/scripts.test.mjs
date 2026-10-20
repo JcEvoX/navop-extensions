@@ -989,9 +989,11 @@ test("MobaXterm importer is registered as a composite WASM importer", () => {
   assert.equal(importer.runtimeId, "mobaxterm-importer");
   assert.deepEqual(importer.outputKinds, ["ssh"]);
   assert.deepEqual(importer.platforms, ["macos", "windows", "linux"]);
-  assert.equal(importer.manualFilePick?.prompt, "选择 MobaXterm.ini / .mxtsessions 文件");
+  // 便携版把 MobaXterm.ini 放在 exe 旁边（不在任何候选路径里），
+  // 所以两条提示文案都必须引导用户去选 exe 所在目录。
+  assert.match(importer.manualFilePick?.prompt, /MobaXterm\.exe 所在目录/);
   assert.equal(importer.manualFilePick?.supportsDirectories, true);
-  assert.equal(importer.manualFilePick?.directoryPrompt, "选择 MobaXterm 配置目录");
+  assert.match(importer.manualFilePick?.directoryPrompt, /MobaXterm\.exe 所在文件夹/);
   assert.ok(
     importer.candidateFiles.some((candidate) => candidate.path === "%USERPROFILE%/Documents/MobaXterm"),
     "MobaXterm importer should discover Windows Documents configuration directories",
@@ -1000,8 +1002,37 @@ test("MobaXterm importer is registered as a composite WASM importer", () => {
     importer.candidateFiles.some((candidate) => candidate.path === "%APPDATA%/MobaXterm"),
     "MobaXterm importer should discover Windows AppData configuration directories",
   );
+  // Documents 被 OneDrive 接管时 %USERPROFILE%/Documents 会失效，需要这两条兜底。
+  assert.ok(
+    importer.candidateFiles.some((candidate) => candidate.path === "%USERPROFILE%/OneDrive/Documents/MobaXterm"),
+    "MobaXterm importer should discover OneDrive Documents configuration directories",
+  );
+  assert.ok(
+    importer.candidateFiles.some((candidate) => candidate.path === "%OneDrive%/Documents/MobaXterm"),
+    "MobaXterm importer should discover OneDrive-redirected Documents directories",
+  );
   assert.ok(sourceManifest.permissions.includes("fs:read:%USERPROFILE%/Documents/MobaXterm"));
   assert.ok(sourceManifest.permissions.includes("fs:read:%APPDATA%/MobaXterm"));
+  assert.ok(sourceManifest.permissions.includes("fs:read:%USERPROFILE%/OneDrive/Documents/MobaXterm"));
+  assert.ok(sourceManifest.permissions.includes("fs:read:%OneDrive%/Documents/MobaXterm"));
+});
+
+// 这三个导入器在 2026-10 支持了解密厂商保存的密码。capability 由 wasm 组件在
+// 运行时返回（不在 manifest 里），宿主的导入向导靠它决定是否显示「导入密码」
+// 开关，置 false 就等于静默关闭该功能。
+test("importers that decrypt vendor passwords declare the password capability", () => {
+  const expected = ["securecrt-importer", "mobaxterm-importer", "navicat-importer"];
+  for (const slug of expected) {
+    const component = fs.readFileSync(
+      path.join(repoRoot, "extensions/wasm", slug, "src/component.rs"),
+      "utf8",
+    );
+    assert.match(
+      component,
+      /"supports_password_import":\s*true/,
+      `${slug} decrypts vendor passwords and must declare supports_password_import`,
+    );
+  }
 });
 
 test("SecureCRT importer is registered as a composite WASM importer", () => {

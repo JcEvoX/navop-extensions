@@ -8,7 +8,12 @@ publish.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+aes = "0.8"
+bcrypt-pbkdf = "0.10"
+blowfish = "0.9"
+cbc = { version = "0.1", features = ["alloc", "block-padding"] }
 quick-xml = "0.39"
+sha2 = "0.10"
 serde.workspace = true
 serde_json.workspace = true
 wit-bindgen = "0.57.1"

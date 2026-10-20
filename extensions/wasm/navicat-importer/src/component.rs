@@ -19,7 +19,7 @@ impl Guest for NavicatImporter {
             "output_kinds": ["database"],
             "capabilities": {
                 "supports_scan": true,
-                "supports_password_import": false,
+                "supports_password_import": true,
                 "supports_manual_file_pick": true,
                 "manual_file_pick_prompt": "选择 Navicat 导出的 connection.ncx 文件",
                 "supports_incremental_preview": false

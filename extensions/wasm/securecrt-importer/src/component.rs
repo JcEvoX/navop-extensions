@@ -9,8 +9,8 @@ use onet::extension::{
 };
 
 use crate::securecrt::{
-    ImportWarning, PreviewResult, append_workspace_records, classify_source,
-    preview_records_from_sources, session_directory_group_path,
+    DEFAULT_PASSPHRASE, ImportWarning, PreviewResult, append_workspace_records, classify_source,
+    preview_records_from_sources_with_passphrase, session_directory_group_path,
 };
 use std::collections::BTreeSet;
 
@@ -65,7 +65,7 @@ impl Guest for SecureCrtImporter {
             "output_kinds": ["ssh", "quick_command", "workspace"],
             "capabilities": {
                 "supports_scan": true,
-                "supports_password_import": false,
+                "supports_password_import": true,
                 "supports_manual_file_pick": true,
                 "supports_incremental_preview": false
             }
@@ -200,12 +200,17 @@ fn collect_single_file(candidate: &CandidateFile, collected: &mut CollectedSourc
 }
 
 fn parse_sources(collected: &CollectedSources, include_passwords: bool) -> PreviewResult {
-    let mut preview = preview_records_from_sources(
+    // 目前固定用默认（空）配置口令：`import-options` 还没有「配置口令」这个字段。
+    // 用户在 SecureCRT 里设过自定义 Configuration Passphrase 时，V2 密文会解密
+    // 失败并被标成 unsupported + `securecrt_password_decrypt_failed` 警告。
+    // 要支持这类用户，需要给 wit 的 import-options 加一个 optional 口令字段。
+    let mut preview = preview_records_from_sources_with_passphrase(
         collected
             .files
             .iter()
             .map(|(path, bytes)| (path.clone(), bytes.as_slice())),
         include_passwords,
+        DEFAULT_PASSPHRASE,
     );
     append_workspace_records(&mut preview, collected.session_groups.iter().cloned());
     preview

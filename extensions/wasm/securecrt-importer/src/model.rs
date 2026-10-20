@@ -1,6 +1,8 @@
 use serde::Serialize;
 use std::collections::BTreeMap;
 
+use super::decrypt::{self, DecryptError};
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct PreviewResult {
     pub records: Vec<ImportRecord>,
@@ -76,7 +78,34 @@ pub struct ImportWarning {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CredentialMetadata {
     pub username: Option<String>,
-    pub encrypted_password: bool,
+    /// Credentials 目录里这条凭据是否带了密文（不论是否允许解密）。
+    pub has_ciphertext: bool,
+    /// 已解密的明文；仅在 `include_passwords` 且解密成功时才有值。
+    pub password: Option<String>,
+    /// 带密文但解密失败的原因（通常是用户设了 SecureCRT 配置口令）。
+    pub password_error: Option<DecryptError>,
+}
+
+/// 一个会话最终能拿到什么密码。
+pub(crate) enum ResolvedPassword {
+    /// 调用方没要求导入密码。
+    NotRequested,
+    /// 会话和凭据里都没有密码字段。
+    Missing,
+    /// 解密出的明文。
+    Included(String),
+    /// 有密文但解不开。
+    Failed(DecryptError),
+}
+
+impl ResolvedPassword {
+    /// 该记录是否「看起来应该有密码」——决定 SSH 认证方式是否算密码认证。
+    fn has_ciphertext(&self) -> bool {
+        matches!(
+            self,
+            Self::NotRequested | Self::Included(_) | Self::Failed(_)
+        )
+    }
 }
 
 pub(crate) fn ssh_record(
@@ -85,6 +114,8 @@ pub(crate) fn ssh_record(
     name: String,
     fields: &BTreeMap<String, String>,
     port: Option<u16>,
+    include_passwords: bool,
+    passphrase: &str,
     warnings: &mut Vec<ImportWarning>,
 ) -> Option<ImportRecord> {
     let protocol = field(fields, "Protocol Name").unwrap_or_default();
@@ -99,29 +130,49 @@ pub(crate) fn ssh_record(
         return None;
     };
     let username = field(fields, "Username").unwrap_or_default();
-    let encrypted_password = has_value(fields, "Password V2")
-        || has_value(fields, "Password")
-        || has_value(fields, "Credential Encrypted Password");
     let identity = field(fields, "Identity Filename V2")
         .or_else(|| field(fields, "Identity File"))
         .filter(|value| !value.is_empty());
-    let auth_method = match (identity, encrypted_password) {
+    // 私钥认证不消费密码：只保留「有没有密文」这个事实，不做解密——
+    // V2-`03:` 每条要走 bcrypt-pbkdf，白白多花上百毫秒没有意义。
+    let resolved = if identity.is_some() {
+        if has_session_password_material(fields) {
+            ResolvedPassword::NotRequested
+        } else {
+            ResolvedPassword::Missing
+        }
+    } else {
+        resolve_password(fields, include_passwords, passphrase)
+    };
+    let password = match &resolved {
+        ResolvedPassword::Included(password) => Some(password.clone()),
+        _ => None,
+    };
+    let auth_method = match (identity, resolved.has_ciphertext()) {
         (Some(key_path), _) => SshImportAuthMethod::PrivateKey {
             key_path,
             passphrase: None,
         },
-        (None, true) => SshImportAuthMethod::Password { password: None },
+        (None, true) => SshImportAuthMethod::Password {
+            password: password.clone(),
+        },
         (None, false) => SshImportAuthMethod::AutoPublicKey,
     };
-    let warnings = encrypted_password
-        .then(|| {
-            warning(
-                "securecrt_encrypted_password_not_imported",
-                "SecureCRT encrypted password was not imported because this importer does not decrypt configuration passwords.",
-            )
-        })
-        .into_iter()
-        .collect();
+    let (password_status, warnings) = match &resolved {
+        ResolvedPassword::NotRequested => ("unsupported", Vec::new()),
+        ResolvedPassword::Missing => ("missing", Vec::new()),
+        ResolvedPassword::Included(_) => ("included", Vec::new()),
+        ResolvedPassword::Failed(error) => (
+            "unsupported",
+            vec![warning(
+                "securecrt_password_decrypt_failed",
+                format!(
+                    "A SecureCRT password could not be decrypted, so it was not imported: {}.",
+                    error.reason()
+                ),
+            )],
+        ),
+    };
     Some(ImportRecord {
         id: record_id("ssh", &source_id),
         importer_id: "securecrt".to_string(),
@@ -144,14 +195,73 @@ pub(crate) fn ssh_record(
         port_forwarding: None,
         quick_command: None,
         workspace: None,
-        password_status: if encrypted_password {
-            "unsupported"
-        } else {
-            "missing"
-        }
-        .to_string(),
+        password_status: password_status.to_string(),
         warnings,
     })
+}
+
+/// 密码来源优先级：Credentials 凭据 > 会话自带字段。
+///
+/// 凭据明文由 `preview_records_from_sources` 预先解好放进 `password` 字段，
+/// 会话自带的密文在这里解。
+fn resolve_password(
+    fields: &BTreeMap<String, String>,
+    include_passwords: bool,
+    passphrase: &str,
+) -> ResolvedPassword {
+    let session_ciphertext = field(fields, "Password V2").or_else(|| field(fields, "Password"));
+    let credential_ciphertext = has_value(fields, "Credential Encrypted Password");
+    if !include_passwords {
+        return if has_session_password_material(fields) {
+            ResolvedPassword::NotRequested
+        } else {
+            ResolvedPassword::Missing
+        };
+    }
+    if let Some(password) = field(fields, "password") {
+        return ResolvedPassword::Included(password);
+    }
+    if let Some(reason) = field(fields, "credential password error") {
+        return ResolvedPassword::Failed(decode_reason(&reason));
+    }
+    let Some(ciphertext) = session_ciphertext else {
+        return if credential_ciphertext {
+            // 凭据有密文但既没解出明文也没有错误记录：只可能是调用方没要求密码。
+            ResolvedPassword::NotRequested
+        } else {
+            ResolvedPassword::Missing
+        };
+    };
+    match decrypt::decrypt_config_password(&ciphertext, passphrase) {
+        Ok(password) => ResolvedPassword::Included(password),
+        Err(error) => ResolvedPassword::Failed(error),
+    }
+}
+
+/// 会话（含其引用的凭据）里是否出现了任何密码材料。
+fn has_session_password_material(fields: &BTreeMap<String, String>) -> bool {
+    has_value(fields, "Password V2")
+        || has_value(fields, "Password")
+        || has_value(fields, "Credential Encrypted Password")
+        || has_value(fields, "password")
+        || has_value(fields, "credential password error")
+}
+
+/// 把经 `reason()` 序列化过的错误文本还原成枚举；认不出来时按校验和失败处理。
+fn decode_reason(reason: &str) -> DecryptError {
+    use DecryptError::*;
+    [
+        NotCiphertext,
+        InvalidHex,
+        BadLength,
+        UnknownPrefix,
+        BadPadding,
+        BadChecksum,
+        NotText,
+    ]
+    .into_iter()
+    .find(|error| error.reason() == reason)
+    .unwrap_or(BadChecksum)
 }
 
 pub(crate) fn quick_command_record(
@@ -235,7 +345,18 @@ pub(crate) fn enrich_from_credential(
                 fields.insert("username".to_string(), username.clone());
             }
         }
-        if credential.encrypted_password {
+        if let Some(password) = credential
+            .password
+            .as_ref()
+            .filter(|value| !value.is_empty())
+        {
+            fields.insert("password".to_string(), password.clone());
+        } else if let Some(error) = credential.password_error {
+            fields.insert(
+                "credential password error".to_string(),
+                error.reason().to_string(),
+            );
+        } else if credential.has_ciphertext {
             fields.insert(
                 "credential encrypted password".to_string(),
                 "present".to_string(),
