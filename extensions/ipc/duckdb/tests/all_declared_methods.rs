@@ -9,6 +9,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 const SCHEMA_OBJECT_VIEW: &str = "schema/object_view";
+const SCHEMA_DUMP_DDL: &str = "schema/dump_ddl";
 
 #[tokio::test]
 async fn duckdb_driver_declared_methods_are_callable() {
@@ -585,6 +586,28 @@ async fn duckdb_driver_declared_methods_are_callable() {
     assert_eq!(
         Some("\"payload\" TEXT NOT NULL"),
         generic_ddl["statements"][0].as_str()
+    );
+
+    // driver.json 从 509294a 起就声明了 schema/dump_ddl，但这个用例一直没跟着调用，
+    // 导致只要 duckdb 被 CI 选中就报「声明与调用集合不一致」。
+    let dumped: Value = call(
+        &handle,
+        &timeout,
+        &mut called,
+        SCHEMA_DUMP_DDL,
+        json!({
+            "conn_id": conn_id,
+            "objects": [{ "kind": "table", "name": "events" }]
+        }),
+    )
+    .await;
+    assert!(
+        dumped["statements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|sql| sql.as_str().unwrap().contains("CREATE TABLE")),
+        "schema/dump_ddl should return the CREATE TABLE statement for events: {dumped}"
     );
 
     call_value(

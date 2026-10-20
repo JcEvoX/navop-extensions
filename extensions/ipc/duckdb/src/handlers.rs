@@ -1286,9 +1286,11 @@ pub fn handle_schema_dump_ddl(
         statements.push(table_ddl);
 
         // 索引 DDL：同一张表的全部非内部索引。
+        // `duckdb_indexes()` 没有 `internal` 列（那是 `duckdb_tables()` 的），
+        // 只能靠 `is_primary = FALSE` + `sql IS NOT NULL` 排除主键自建的 ART 索引。
         let mut index_sql = String::from(
-            "SELECT sql FROM duckdb_indexes() WHERE table_name = ? AND internal = FALSE \
-             AND index_name IS NOT NULL ORDER BY index_name",
+            "SELECT sql FROM duckdb_indexes() WHERE table_name = ? AND is_primary = FALSE \
+             AND sql IS NOT NULL AND index_name IS NOT NULL ORDER BY index_name",
         );
         let mut index_values = vec![object.name.clone()];
         append_database_schema_filters(
