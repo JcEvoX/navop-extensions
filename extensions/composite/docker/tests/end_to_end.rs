@@ -1,7 +1,7 @@
 use std::{fs, path::Path, sync::Arc, time::Duration};
 
 use extension_host::{
-    NegotiationConfig, ProcessRpcSession, ProcessRpcSessionConfig, SpawnConfig,
+    HostError, NegotiationConfig, ProcessRpcSession, ProcessRpcSessionConfig, SpawnConfig,
     UniversalPluginClient,
 };
 use extension_protocol::{
@@ -11,13 +11,47 @@ use extension_protocol::{
 use serde_json::{Value, json};
 
 fn copy_executable(source: &Path, destination: &Path) {
-    fs::copy(source, destination).expect("copy provider executable");
+    // 不用 `fs::copy`:它在 Linux 上走 copy_file_range,overlayfs(GitHub runner 的
+    // 根文件系统)上目标 inode 的写引用可能还没释放,紧接着 execve 就偶发 ETXTBSY。
+    // 显式 read/write + sync_all,在 spawn 之前把写入彻底收尾。
+    let bytes = fs::read(source).expect("read provider executable");
+    {
+        use std::io::Write;
+        let mut file = fs::File::create(destination).expect("create provider executable");
+        file.write_all(&bytes).expect("write provider executable");
+        file.sync_all().expect("flush provider executable");
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let mut permissions = fs::metadata(destination).unwrap().permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(destination, permissions).unwrap();
+    }
+}
+
+/// Linux 上 execve 返回 ETXTBSY(`Text file busy`)当目标文件仍被写引用:
+/// 报错本身是瞬时的,重试即可恢复,不能当成真实失败。
+fn is_executable_busy(error: &HostError) -> bool {
+    matches!(
+        error,
+        HostError::Io(io) if io.kind() == std::io::ErrorKind::ExecutableFileBusy
+    )
+}
+
+/// 起 provider 进程;对 ETXTBSY 做有限重试(见 `is_executable_busy`)。
+async fn start_session(config: ProcessRpcSessionConfig) -> Arc<ProcessRpcSession> {
+    const MAX_ATTEMPTS: u32 = 6;
+    let mut attempt = 0;
+    loop {
+        match ProcessRpcSession::start(config.clone()).await {
+            Ok(session) => return Arc::new(session),
+            Err(error) if is_executable_busy(&error) && attempt + 1 < MAX_ATTEMPTS => {
+                attempt += 1;
+                tokio::time::sleep(Duration::from_millis(50 * u64::from(attempt))).await;
+            }
+            Err(error) => panic!("start provider: {error:?}"),
+        }
     }
 }
 
@@ -43,7 +77,7 @@ async fn live_docker_provider_smoke() {
     .with_request_timeout(Duration::from_secs(10))
     .with_shutdown_grace_ms(2_500)
     .with_label("com.navop.docker::main");
-    let session = Arc::new(ProcessRpcSession::start(config).await.unwrap());
+    let session = start_session(config).await;
     let client = UniversalPluginClient::new(Arc::clone(&session));
     let opened = client
         .open_resource(&ResourceOpenParams {
