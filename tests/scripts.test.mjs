@@ -1008,13 +1008,90 @@ test("MobaXterm importer is registered as a composite WASM importer", () => {
     "MobaXterm importer should discover OneDrive Documents configuration directories",
   );
   assert.ok(
-    importer.candidateFiles.some((candidate) => candidate.path === "%OneDrive%/Documents/MobaXterm"),
+    importer.candidateFiles.some((candidate) => candidate.path === "%ONEDRIVE%/Documents/MobaXterm"),
     "MobaXterm importer should discover OneDrive-redirected Documents directories",
   );
   assert.ok(sourceManifest.permissions.includes("fs:read:%USERPROFILE%/Documents/MobaXterm"));
   assert.ok(sourceManifest.permissions.includes("fs:read:%APPDATA%/MobaXterm"));
   assert.ok(sourceManifest.permissions.includes("fs:read:%USERPROFILE%/OneDrive/Documents/MobaXterm"));
-  assert.ok(sourceManifest.permissions.includes("fs:read:%OneDrive%/Documents/MobaXterm"));
+  assert.ok(sourceManifest.permissions.includes("fs:read:%ONEDRIVE%/Documents/MobaXterm"));
+});
+
+// 宿主在**安装时**就校验 powers/permissions 里的路径,不合规直接拒装:
+//   manifest 字段 /permissions 非法: invalid extension permission `fs:read:%OneDrive%/…`
+// mobaxterm-importer 0.1.1 就是这么废掉的 —— 变量名只允许 [A-Z0-9_],
+// `%OneDrive%` 的大小写混写会被判成「不是绝对路径」,而且这条校验不分平台,
+// 于是 Windows 上最自然的写法让**所有平台**都装不上。
+// 这里照抄 navop `extension-runtime/src/extension/manifest/security_rules.rs`
+// 的 validate_fs_permission 规则,把「装不上」提前到 CI。
+test("extension fs permissions only use paths the host validator accepts", () => {
+  const allowedExact = new Set(["~", "${task.workspace}", "${user_pick}", "${pluginDir}"]);
+  // 与宿主 windows_env_path_prefix 对齐:变量名只认大写字母、数字和下划线。
+  const windowsEnvPrefix = /^%[A-Z0-9_]+%[\\/]/;
+  const escapes = new Set(["..", "."]);
+
+  const kinds = fs.readdirSync(path.join(repoRoot, "extensions"));
+  const checked = [];
+  for (const kind of kinds) {
+    const kindDir = path.join(repoRoot, "extensions", kind);
+    if (!fs.statSync(kindDir).isDirectory()) continue;
+    for (const id of fs.readdirSync(kindDir)) {
+      const manifestPath = path.join(kindDir, id, "extension.json");
+      if (!fs.existsSync(manifestPath)) continue;
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+      for (const permission of manifest.permissions ?? []) {
+        const match = /^fs:(read|write):([\s\S]*)$/.exec(permission);
+        if (!match) continue;
+        const target = match[2];
+        const label = `extensions/${kind}/${id}: ${permission}`;
+        assert.notEqual(target, "*", `${label} 不能用通配符`);
+        assert.notEqual(target, "/", `${label} 不能是整盘根目录`);
+        assert.ok(
+          !target.split(/[\\/]/).some((segment) => escapes.has(segment)),
+          `${label} 不能包含相对逃逸`,
+        );
+        const allowed =
+          allowedExact.has(target) ||
+          target.startsWith("~/") ||
+          target.startsWith("/") ||
+          target.startsWith("${pluginDir}/") ||
+          windowsEnvPrefix.test(target);
+        assert.ok(
+          allowed,
+          `${label} 会被宿主拒绝安装:路径既不是绝对路径、~/ 也不是 %UPPER_CASE% 变量`,
+        );
+        checked.push(label);
+      }
+    }
+  }
+  assert.ok(checked.length > 0, "expected at least one fs permission across extensions");
+});
+
+// 候选路径与 fs:read 权限是**逐字**匹配的(CandidateFileAccess::candidate 拿
+// candidate.path 去查 PermissionSet),少一条权限就是运行期 PermissionDenied ——
+// 用户看到的是「扫不到配置」。所以两条必须成对出现。
+test("connection import candidates are covered by matching fs:read permissions", () => {
+  const kinds = fs.readdirSync(path.join(repoRoot, "extensions"));
+  for (const kind of kinds) {
+    const kindDir = path.join(repoRoot, "extensions", kind);
+    if (!fs.statSync(kindDir).isDirectory()) continue;
+    for (const id of fs.readdirSync(kindDir)) {
+      const manifestPath = path.join(kindDir, id, "extension.json");
+      if (!fs.existsSync(manifestPath)) continue;
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+      const permissions = new Set(manifest.permissions ?? []);
+      const importers = manifest.contributes?.connectionImporters ?? [];
+      for (const importer of importers) {
+        for (const candidate of importer.candidateFiles ?? []) {
+          if (typeof candidate.path !== "string") continue;
+          assert.ok(
+            permissions.has(`fs:read:${candidate.path}`),
+            `extensions/${kind}/${id}: 候选 ${candidate.id} 缺少权限 fs:read:${candidate.path}`,
+          );
+        }
+      }
+    }
+  }
 });
 
 // 这三个导入器在 2026-10 支持了解密厂商保存的密码。capability 由 wasm 组件在
