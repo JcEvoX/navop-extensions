@@ -1017,6 +1017,67 @@ test("MobaXterm importer is registered as a composite WASM importer", () => {
   assert.ok(sourceManifest.permissions.includes("fs:read:%ONEDRIVE%/Documents/MobaXterm"));
 });
 
+test("HexHub importer is registered as a composite WASM importer", () => {
+  const globalManifest = JSON.parse(fs.readFileSync(path.join(repoRoot, "manifest.json"), "utf8"));
+  const buildMetadata = JSON.parse(
+    fs.readFileSync(path.join(repoRoot, "extensions/wasm/hexhub-importer/extension.build.json"), "utf8"),
+  );
+  const sourceManifest = JSON.parse(
+    fs.readFileSync(path.join(repoRoot, "extensions/wasm/hexhub-importer/extension.json"), "utf8"),
+  );
+  const importer = sourceManifest.contributes.connectionImporters[0];
+
+  assert.equal(buildMetadata.kind, "composite");
+  assert.equal(buildMetadata.language, "rust-wasm");
+  assert.equal(buildMetadata.package, "hexhub_importer_wasm");
+  assert.equal(buildMetadata.binary, "hexhub_importer_wasm.wasm");
+  assert.deepEqual(buildMetadata.targets, ["universal"]);
+  // 0.1.0 已发版：不再声明 `published: false`，且根清单里必须有它的条目，
+  // 否则 upload-r2 推上去的市场索引里搜不到这个扩展。
+  assert.notEqual(buildMetadata.published, false, "hexhub-importer is released, published: false must be removed");
+  const marketplaceEntry = globalManifest.extensions.find(
+    (extension) => extension.id === sourceManifest.id,
+  );
+  assert.ok(marketplaceEntry, "a released importer must appear in the marketplace manifest");
+  assert.equal(marketplaceEntry.release_tag, "hexhub-importer-v0.1.0");
+  assert.equal(marketplaceEntry.manifest, "hexhub-importer/manifest.json");
+  assert.equal(marketplaceEntry.description, sourceManifest.description);
+
+  assert.equal(sourceManifest.id, "com.onetcli.importer.hexhub");
+  assert.equal(importer.id, "hexhub");
+  assert.equal(importer.runtimeId, "hexhub-importer");
+  assert.equal(sourceManifest.runtime.wasm[0].id, importer.runtimeId);
+  assert.equal(sourceManifest.runtime.wasm[0].module, "wasm/hexhub_importer_wasm.wasm");
+  assert.deepEqual(importer.outputKinds, ["ssh", "database", "quick-command"]);
+  assert.deepEqual(importer.platforms, ["macos", "windows", "linux"]);
+  // HexHub 的资产在应用自己的库里（Dexie），唯一能离线读的是导出的 HexHub-Assets.json，
+  // 所以手选必须可用，并且提示里要写清是哪一个文件。
+  assert.match(importer.manualFilePick?.prompt, /HexHub-Assets\.json/);
+  assert.ok(
+    importer.candidateFiles.some((candidate) => candidate.path === "~/Downloads/HexHub-Assets.json"),
+    "HexHub importer should discover the default macOS/Linux export location",
+  );
+  assert.ok(
+    importer.candidateFiles.some(
+      (candidate) => candidate.path === "%USERPROFILE%/Downloads/HexHub-Assets.json",
+    ),
+    "HexHub importer should discover the default Windows export location",
+  );
+  assert.ok(sourceManifest.permissions.includes("fs:read:~/Downloads/HexHub-Assets.json"));
+  assert.ok(sourceManifest.permissions.includes("fs:read:%USERPROFILE%/Downloads/HexHub-Assets.json"));
+});
+
+// 固定密钥是 HexHub 客户端内置的常量（`encryptFields` → `Yu()`），改错一个字节就再也
+// 解不开口令，而且**解出来是乱码而不是报错**（CBC 没有认证）。钉住常量本身。
+test("HexHub importer decrypts with the documented vendor key", () => {
+  const decrypt = fs.readFileSync(
+    path.join(repoRoot, "extensions/wasm/hexhub-importer/src/decrypt.rs"),
+    "utf8",
+  );
+  assert.ok(decrypt.includes('b"CsN#&Uc!aOUQbh&B"'), "HexHub AES key must match the client constant");
+  assert.ok(decrypt.includes('b"w6KQ^MPlEx*mfHcb"'), "HexHub AES IV must match the client constant");
+});
+
 // 宿主在**安装时**就校验 powers/permissions 里的路径,不合规直接拒装:
 //   manifest 字段 /permissions 非法: invalid extension permission `fs:read:%OneDrive%/…`
 // mobaxterm-importer 0.1.1 就是这么废掉的 —— 变量名只允许 [A-Z0-9_],
@@ -1098,7 +1159,7 @@ test("connection import candidates are covered by matching fs:read permissions",
 // 运行时返回（不在 manifest 里），宿主的导入向导靠它决定是否显示「导入密码」
 // 开关，置 false 就等于静默关闭该功能。
 test("importers that decrypt vendor passwords declare the password capability", () => {
-  const expected = ["securecrt-importer", "mobaxterm-importer", "navicat-importer"];
+  const expected = ["securecrt-importer", "mobaxterm-importer", "navicat-importer", "hexhub-importer"];
   for (const slug of expected) {
     const component = fs.readFileSync(
       path.join(repoRoot, "extensions/wasm", slug, "src/component.rs"),

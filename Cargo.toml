@@ -10,6 +10,7 @@ members = [
     "extensions/ipc/redis",
     "extensions/ipc/tdengine",
     "extensions/wasm/dbeaver-importer",
+    "extensions/wasm/hexhub-importer",
     "extensions/wasm/jetbrains-importer",
     "extensions/wasm/math-renderer",
     "extensions/wasm/mermaid-renderer",

@@ -1,0 +1,13 @@
+{
+  "id": "hexhub-importer",
+  "kind": "composite",
+  "language": "rust-wasm",
+  "package": "hexhub_importer_wasm",
+  "binary": "hexhub_importer_wasm.wasm",
+  "path": "extensions/wasm/hexhub-importer",
+  "targets": [
+    "universal"
+  ],
+  "releaseTagPrefix": "hexhub-importer-v",
+  "r2Prefix": "extensions/hexhub-importer"
+}
