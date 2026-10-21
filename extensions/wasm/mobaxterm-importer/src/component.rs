@@ -40,18 +40,38 @@ impl Guest for MobaxtermImporter {
         let candidates = connection_import_host::list_candidate_files("mobaxterm");
         let sessions = read_sessions(&candidates);
         // 扫描阶段只统计条数，不解密口令（`include_passwords = false`）。
-        let record_count = crate::mobaxterm::preview_records_from_sources_with_master_password(
+        let report = crate::mobaxterm::preview_report_from_sources(
             sessions
                 .iter()
                 .map(|(path, bytes)| (path.clone(), bytes.as_slice())),
             false,
             None,
-        )
-        .len();
+        );
+        let record_count = report.records.len();
         let availability = if record_count == 0 {
             serde_json::json!("no_data")
         } else {
             serde_json::json!({ "available": { "estimated_count": record_count } })
+        };
+        // 非 SSH 会话（RDP/VNC/telnet…）导入协议里没有对应类型，扫到就如实报数，
+        // 否则用户只会看到「条数比 MobaXterm 里少」而不知道少在哪。
+        let warnings = if report.skipped.is_empty() {
+            Vec::new()
+        } else {
+            let total: usize = report.skipped.iter().map(|(_, count)| count).sum();
+            let detail = report
+                .skipped
+                .iter()
+                .map(|(label, count)| format!("{label} ×{count}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            vec![serde_json::json!({
+                "code": "mobaxterm_non_ssh_sessions_skipped",
+                "message": format!(
+                    "{total} non-SSH session(s) were skipped ({detail}). Only SSH, database \
+                     and port-forwarding connections can be imported."
+                )
+            })]
         };
 
         serde_json::json!({
@@ -63,7 +83,7 @@ impl Guest for MobaxtermImporter {
                     "display_path": path
                 })
             }).collect::<Vec<_>>(),
-            "warnings": []
+            "warnings": warnings
         })
         .to_string()
     }

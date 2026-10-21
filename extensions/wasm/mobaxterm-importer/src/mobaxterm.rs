@@ -9,6 +9,11 @@ use decrypt::StoredSecretInput;
 const MAX_MOBATXTERM_SESSIONS: usize = 8192;
 const DEFAULT_SSH_PORT: u16 = 22;
 
+/// 会话串第一组参数的索引 0 是会话类型（见 `session_type_label`）。
+const SSH_SESSION_TYPE: &str = "0";
+/// SFTP 会话：和 SSH 共用主机/端口/用户名/口令，宿主侧统一建模成 SSH，导进来才有用。
+const SFTP_SESSION_TYPE: &str = "7";
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ImportRecord {
     pub id: String,
@@ -57,11 +62,19 @@ pub struct ImportWarning {
     pub message: String,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PreviewReport {
+    pub records: Vec<ImportRecord>,
+    /// 没能导入的非 SSH 会话：会话类型名 → 条数。宿主的导入协议只认 SSH / 数据库 /
+    /// 端口转发，RDP、VNC、telnet 之类没有对应的记录类型，只能如实报数。
+    pub skipped: Vec<(String, usize)>,
+}
+
 pub fn preview_records_from_sources<'a, I>(sources: I, include_passwords: bool) -> Vec<ImportRecord>
 where
     I: IntoIterator<Item = (String, &'a [u8])>,
 {
-    preview_records_from_sources_with_master_password(sources, include_passwords, None)
+    preview_report_from_sources(sources, include_passwords, None).records
 }
 
 /// 与 [`preview_records_from_sources`] 相同，但允许传入 MobaXterm 主密码。
@@ -76,27 +89,40 @@ pub fn preview_records_from_sources_with_master_password<'a, I>(
 where
     I: IntoIterator<Item = (String, &'a [u8])>,
 {
-    let mut records = Vec::new();
+    preview_report_from_sources(sources, include_passwords, master_password).records
+}
+
+/// 带「被跳过的会话」统计的预览，供 `scan()` 与警告文案使用。
+pub fn preview_report_from_sources<'a, I>(
+    sources: I,
+    include_passwords: bool,
+    master_password: Option<&str>,
+) -> PreviewReport
+where
+    I: IntoIterator<Item = (String, &'a [u8])>,
+{
+    let mut report = PreviewReport::default();
     let mut seen = BTreeSet::new();
+    let mut skipped: BTreeMap<String, usize> = BTreeMap::new();
     for (path, bytes) in sources {
         let Some(text) = decode_text(bytes) else {
             continue;
         };
-        for record in parse_ini_sessions_with_master_password(
-            &path,
-            &text,
-            include_passwords,
-            master_password,
-        ) {
+        let file = parse_file_report(&path, &text, include_passwords, master_password);
+        for record in file.records {
             if seen.insert(record.id.clone()) {
-                records.push(record);
+                report.records.push(record);
             }
         }
-        if records.len() >= MAX_MOBATXTERM_SESSIONS {
+        for (label, count) in file.skipped {
+            *skipped.entry(label).or_default() += count;
+        }
+        if report.records.len() >= MAX_MOBATXTERM_SESSIONS {
             break;
         }
     }
-    records
+    report.skipped = skipped.into_iter().collect();
+    report
 }
 
 pub fn is_supported_source_path(path: &str) -> bool {
@@ -109,31 +135,61 @@ pub fn is_supported_source_path(path: &str) -> bool {
 
 #[cfg(test)]
 fn parse_ini_sessions(path: &str, text: &str) -> Vec<ImportRecord> {
-    parse_ini_sessions_with_master_password(path, text, false, None)
+    parse_file_report(path, text, false, None).records
 }
 
-fn parse_ini_sessions_with_master_password(
+#[derive(Default)]
+struct FileReport {
+    records: Vec<ImportRecord>,
+    skipped: BTreeMap<String, usize>,
+}
+
+fn parse_file_report(
     path: &str,
     text: &str,
     include_passwords: bool,
     master_password: Option<&str>,
-) -> Vec<ImportRecord> {
+) -> FileReport {
     let file = ParsedFile::parse(text);
     let store = PasswordStore::build(&file, include_passwords, master_password);
-    let mut records = Vec::new();
+    let mut report = FileReport::default();
     for entry in &file.sessions {
         let group = file.section_group(&entry.section);
-        if let Some(record) = session_record(path, &entry.key, &entry.value, group, &store) {
-            records.push(record);
+        match session_record(path, entry, group, &store) {
+            SessionOutcome::Record(record) => report.records.push(record),
+            SessionOutcome::Skipped(label) => *report.skipped.entry(label).or_default() += 1,
+            SessionOutcome::Unusable => {}
         }
     }
-    // 文件级警告（口令存在注册表、主密码缺失……）挂到首条记录上，导入界面按记录展示。
-    if let Some(first) = records.first_mut() {
-        let mut warnings = store.file_warnings.clone();
+    // 文件级警告（跳过非 SSH 会话、口令存在注册表、主密码缺失……）挂到首条记录上，
+    // 导入界面按记录展示。
+    let mut warnings = skipped_warnings(&report.skipped);
+    warnings.extend(store.file_warnings.iter().cloned());
+    if let Some(first) = report.records.first_mut() {
         warnings.append(&mut first.warnings);
         first.warnings = warnings;
     }
-    records
+    report
+}
+
+fn skipped_warnings(skipped: &BTreeMap<String, usize>) -> Vec<ImportWarning> {
+    if skipped.is_empty() {
+        return Vec::new();
+    }
+    let total: usize = skipped.values().sum();
+    let detail = skipped
+        .iter()
+        .map(|(label, count)| format!("{label} ×{count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    vec![ImportWarning {
+        code: "mobaxterm_non_ssh_sessions_skipped".to_string(),
+        message: format!(
+            "{total} non-SSH session(s) were skipped ({detail}). Only SSH, database and \
+             port-forwarding connections can be imported, so MobaXterm RDP/VNC/telnet/FTP \
+             sessions are not carried over."
+        ),
+    }]
 }
 
 struct SessionEntry {
@@ -509,28 +565,49 @@ fn is_headerless_session(section: &str, value: &str) -> bool {
     section.is_empty() && is_standard_prefix(value)
 }
 
+enum SessionOutcome {
+    Record(ImportRecord),
+    /// 是会话，但类型不是 SSH 家族：带上是哪种类型，用于汇总成「被跳过」的警告。
+    Skipped(String),
+    /// 不是会话行，或者连主机都没有，无法导入。
+    Unusable,
+}
+
 fn session_record(
     path: &str,
-    key: &str,
-    value: &str,
+    entry: &SessionEntry,
     group: Option<&str>,
     store: &PasswordStore,
-) -> Option<ImportRecord> {
-    let (label, key_group) = session_label_and_group(key);
+) -> SessionOutcome {
+    let (label, key_group) = session_label_and_group(&entry.key);
     let group = key_group.as_deref().or(group);
 
     let name = label.clone();
-    let source_id = format!("{path}#{key}");
-    let id = format!("mobaxterm:{}", slug(&source_id));
+    // `source_id` 必须把段落也算进去：同一个名字可以分别出现在 `[Bookmarks]` 与
+    // `[Bookmarks_1]` 里（不同文件夹各有一条同名会话），只拼 key 会当成同一条丢掉。
+    let source_id = if entry.section.is_empty() {
+        format!("{path}#{}", entry.key)
+    } else {
+        format!("{path}#{}#{}", entry.section, entry.key)
+    };
+    let id = record_id(&source_id);
 
-    let (host, port, username, inline_password) =
-        if let Some(fields) = parse_standard_session(value) {
-            fields
-        } else {
-            parse_legacy_session(value)?
-        };
+    let (host, port, username, inline_password) = if is_standard_prefix(&entry.value) {
+        match parse_standard_session(&entry.value) {
+            Some(fields) => fields,
+            None => {
+                return SessionOutcome::Skipped(describe_session_type(&standard_session_type(
+                    &entry.value,
+                )));
+            }
+        }
+    } else if let Some(fields) = parse_legacy_session(&entry.value) {
+        fields
+    } else {
+        return SessionOutcome::Unusable;
+    };
     if host.is_empty() {
-        return None;
+        return SessionOutcome::Unusable;
     }
 
     let resolved = store
@@ -577,7 +654,7 @@ fn session_record(
         None => (SshImportAuthMethod::AutoPublicKey, "missing"),
     };
 
-    Some(ImportRecord {
+    SessionOutcome::Record(ImportRecord {
         id,
         importer_id: "mobaxterm".to_string(),
         source_label: "MobaXterm".to_string(),
@@ -603,7 +680,8 @@ fn session_record(
 }
 
 // Standard MobaXterm session: `#109#0%HOST%PORT%USER%...`
-// where the second field is the session type (0=SSH, 7=SSH gateway...).
+// The icon number (`109` for SSH by default) is user-changeable, so the type is read
+// from the first `%` field: 0 = SSH, 4 = RDP, 5 = VNC, 7 = SFTP, 11 = browser.
 fn parse_standard_session(value: &str) -> Option<(String, Option<u16>, String, Option<String>)> {
     let outer = value.split('#').collect::<Vec<_>>();
     if outer.len() < 3 || !is_standard_prefix(value) {
@@ -611,11 +689,10 @@ fn parse_standard_session(value: &str) -> Option<(String, Option<u16>, String, O
     }
     let fields = outer[2].split('%').collect::<Vec<_>>();
     let session_type = fields.first().copied().unwrap_or_default().trim();
-    // `#109#` 是 SSH 家族前缀，第二个字段是家族内的变体（0 普通 SSH、7 SSH 网关/Mosh）。
-    // 其他前缀（RDP/VNC/FTP…）由 `is_standard_prefix` 之外的分支处理，这里直接跳过。
-    if session_type != "0" && session_type != "7" {
-        // Non-SSH session types are not imported.
-        return Some((String::new(), None, String::new(), None));
+    // 只收 SSH 与 SFTP：SFTP 的主机/端口/用户名/口令与 SSH 完全通用。
+    // RDP / VNC / telnet / FTP 之类没有对应的导入记录类型，交给调用方汇总成警告。
+    if session_type != SSH_SESSION_TYPE && session_type != SFTP_SESSION_TYPE {
+        return None;
     }
     let host = fields
         .get(1)
@@ -662,6 +739,31 @@ fn is_standard_prefix(value: &str) -> bool {
             .take_while(|ch| ch.is_ascii_digit())
             .count()
             > 0
+}
+
+/// 会话串里第一组参数（`%` 分隔）的索引 0。
+fn standard_session_type(value: &str) -> String {
+    value
+        .split('#')
+        .nth(2)
+        .unwrap_or_default()
+        .split('%')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+/// 把会话类型编号变成能读的名字；编号与含义见 `parse_standard_session` 的注释。
+fn describe_session_type(session_type: &str) -> String {
+    match session_type {
+        "0" | "7" => "SSH".to_string(),
+        "4" => "RDP".to_string(),
+        "5" => "VNC".to_string(),
+        "11" => "browser".to_string(),
+        "" => "unknown".to_string(),
+        other => format!("type {other}"),
+    }
 }
 
 // Older/legacy layouts accepted by MobaXterm, e.g.
@@ -809,6 +911,29 @@ fn decode_utf16(bytes: &[u8], from_bytes: fn([u8; 2]) -> u16) -> Option<String> 
 fn has_extension(path: &str, extension: &str) -> bool {
     path.rsplit_once('.')
         .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case(extension))
+}
+
+/// 记录 ID：可读 slug + 原始 `source_id` 的稳定短哈希。
+///
+/// 只用 slug 会把所有非 ASCII 字符塌成一个 `-`，于是「生产服务器」与「测试服务器」
+/// 会算出同一个 ID —— 预览阶段按 ID 去重，后一条就被当成重复静默丢掉。哈希保证唯一，
+/// slug 保证排查时还能看出是哪条会话。
+fn record_id(source_id: &str) -> String {
+    format!(
+        "mobaxterm:{}-{:016x}",
+        slug(source_id),
+        stable_hash(source_id)
+    )
+}
+
+/// FNV-1a 64 位：不引依赖，跨版本稳定（`DefaultHasher` 不保证）。
+fn stable_hash(value: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 fn slug(value: &str) -> String {
@@ -1095,12 +1220,71 @@ mod tests {
     }
 
     #[test]
-    fn imports_ssh_gateway_session_type_seven() {
+    fn imports_sftp_session_type_seven() {
+        // 索引 0 = 7 是 SFTP：主机/端口/用户名/口令与 SSH 通用，按 SSH 导入。
         let ini = "[Bookmarks]\nSubRep=\ngw=#109#7%10.0.0.9%22%root%%\n";
         let records = parse_ini_sessions("MobaXterm.ini", ini);
 
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].ssh.as_ref().unwrap().host, "10.0.0.9");
+    }
+
+    #[test]
+    fn chinese_session_names_are_kept_as_distinct_records() {
+        // 曾经的 ID 只来自 slug，非 ASCII 字符全被吞掉：两条中文名算出同一个 ID，
+        // 预览按 ID 去重 ⇒ 只剩一条。中文 MobaXterm 里这是最常见的丢记录方式。
+        let ini = "[Bookmarks]\nSubRep=\n\
+                   生产服务器=#109#0%10.0.0.1%22%root%%\n\
+                   测试服务器=#109#0%10.0.0.2%22%root%%\n";
+        let records = parse_ini_sessions("MobaXterm.ini", ini);
+
+        assert_eq!(records.len(), 2);
+        assert_ne!(records[0].id, records[1].id);
+        assert_eq!(records[0].display_name, "生产服务器");
+        assert_eq!(records[1].display_name, "测试服务器");
+        assert_eq!(records[1].ssh.as_ref().unwrap().host, "10.0.0.2");
+    }
+
+    #[test]
+    fn same_session_name_in_two_folders_keeps_both() {
+        // 同名会话可以分别存在于不同文件夹，ID 必须带上段落才不会互相吞掉。
+        let ini = "[Bookmarks]\nSubRep=\nprod=#109#0%10.0.0.1%22%root%%\n\
+                   [Bookmarks_1]\nSubRep=Staging\nprod=#109#0%10.0.0.2%22%root%%\n";
+        let records = parse_ini_sessions("MobaXterm.ini", ini);
+
+        assert_eq!(records.len(), 2);
+        assert_ne!(records[0].id, records[1].id);
+        assert_eq!(
+            records[1].ssh.as_ref().unwrap().group_path.as_deref(),
+            Some("Staging")
+        );
+        assert_eq!(records[1].ssh.as_ref().unwrap().host, "10.0.0.2");
+    }
+
+    #[test]
+    fn non_ssh_sessions_are_reported_instead_of_silently_dropped() {
+        let ini = "[Bookmarks]\nSubRep=\n\
+                   rdp-box=#91#4%10.0.0.20%3389%admin%\n\
+                   vnc-box=#128#5%10.0.0.21%5900%\n\
+                   ssh-box=#109#0%10.0.0.22%22%root%%\n";
+        let report = preview_report_from_sources(
+            vec![("MobaXterm.ini".to_string(), ini.as_bytes())],
+            false,
+            None,
+        );
+
+        assert_eq!(report.records.len(), 1);
+        assert_eq!(
+            report.skipped,
+            vec![("RDP".to_string(), 1), ("VNC".to_string(), 1)]
+        );
+        let warning = report.records[0]
+            .warnings
+            .iter()
+            .find(|warning| warning.code == "mobaxterm_non_ssh_sessions_skipped")
+            .expect("skipped sessions warning");
+        assert!(warning.message.contains("RDP ×1"));
+        assert!(warning.message.contains("VNC ×1"));
     }
 
     #[test]
