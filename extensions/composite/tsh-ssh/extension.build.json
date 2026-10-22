@@ -7,6 +7,5 @@
     "universal"
   ],
   "releaseTagPrefix": "tsh-ssh-v",
-  "r2Prefix": "extensions/tsh-ssh",
-  "published": false
+  "r2Prefix": "extensions/tsh-ssh"
 }
