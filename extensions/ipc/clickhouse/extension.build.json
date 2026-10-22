@@ -5,7 +5,6 @@
   "package": "clickhouse_driver",
   "binary": "clickhouse-ipc-driver",
   "path": "extensions/ipc/clickhouse",
-  "published": false,
   "targets": [
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",

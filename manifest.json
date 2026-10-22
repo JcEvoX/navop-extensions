@@ -293,6 +293,16 @@
       "manifest": "duckdb/manifest.json"
     },
     {
+      "id": "clickhouse",
+      "kind": "database_driver",
+      "name": "ClickHouse",
+      "version": "0.1.0",
+      "release_tag": "clickhouse-v0.1.0",
+      "description": "基于官方 clickhouse Rust 客户端(HTTP 接口,默认 8123 端口,可选 LZ4 压缩与 HTTPS)的 ClickHouse 列式数据库 IPC 驱动,支持连接管理、SQL 查询、库/表/视图/列/跳过索引/自定义函数元数据浏览、表设计与 DDL 构造。 IPC driver for ClickHouse built on the official clickhouse Rust client (HTTP interface, port 8123 by default, optional LZ4 compression and HTTPS), with connection management, SQL queries, database/table/view/column/skipping-index/function metadata browsing, table designer and DDL builders.",
+      "file_extensions": [],
+      "manifest": "clickhouse/manifest.json"
+    },
+    {
       "id": "mongodb-legacy-3-2",
       "kind": "database_driver",
       "name": "MongoDB Legacy 3.2",

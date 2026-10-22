@@ -1384,11 +1384,12 @@ test("Windows x86 backfill matrix resolves every supported published extension",
   );
   const matrix = JSON.parse(output);
 
-  assert.equal(matrix.include.length, 19);
+  assert.equal(matrix.include.length, 20);
   assert.deepEqual(
     matrix.include.map((entry) => entry.extension),
     [
       "claude-acp",
+      "clickhouse",
       "codex-acp",
       "dm",
       "docker",
